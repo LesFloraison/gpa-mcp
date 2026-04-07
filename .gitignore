@@ -1,0 +1,12 @@
+.state/
+__pycache__/
+*.py[cod]
+*.pyc.*
+*.log
+*.gpa_frame
+
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.venv/
