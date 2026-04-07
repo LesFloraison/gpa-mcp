@@ -19,23 +19,34 @@ Auxiliary tool: `get_capture_status`.
 
 ## CLI Examples
 
+Install or refresh the user-level tool after local changes:
+
 ```powershell
-$env:PYTHONPATH='D:\CDXrepo\gpa-mcp\src'
-python -m gpa_mcp.server.runtime run-local-json open_capture --params '{"path":"D:\\CDXrepo\\renderdoc-mcp-master\\bf1_2026_01_21__16_53_05.gpa_frame"}'
-python -m gpa_mcp.server.runtime run-local-json find_events --params-file 'D:\CDXrepo\gpa-mcp\fixtures\find_drawindexed.json'
-python -m gpa_mcp.server.runtime run-local-json inspect_pipeline_state --params-file 'D:\CDXrepo\gpa-mcp\fixtures\eid_481.json'
+uv tool install --reinstall .
+```
+
+```powershell
+gpa-mcp run-local-json open_capture --params '{"path":"D:\\CDXrepo\\renderdoc-mcp-master\\bf1_2026_01_21__16_53_05.gpa_frame"}'
+gpa-mcp run-local-json find_events --params-file 'D:\CDXrepo\gpa-mcp\fixtures\find_drawindexed.json'
+gpa-mcp run-local-json inspect_pipeline_state --params-file 'D:\CDXrepo\gpa-mcp\fixtures\eid_481.json'
 ```
 
 ## MCP Server
 
 ```powershell
-$env:PYTHONPATH='D:\CDXrepo\gpa-mcp\src'
-python -m gpa_mcp.server.runtime run-mcp --transport stdio
+gpa-mcp run-mcp --transport stdio
 ```
 
-The stdio server has a built-in JSON-RPC fallback and does not require `fastmcp`.
-Install the optional `fastmcp` extra only if you want the FastMCP-backed HTTP
-transport.
+`fastmcp` is a required dependency and is installed with the `gpa-mcp` uv tool.
+The Codex MCP config should call the tool executable directly instead of a bare
+Python interpreter:
+
+```toml
+[mcp_servers.gpa-mcp]
+args = ["run-mcp", "--transport", "stdio"]
+command = "gpa-mcp"
+enabled = true
+```
 
 ## Notes
 
