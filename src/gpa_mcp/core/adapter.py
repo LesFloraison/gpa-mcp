@@ -3,19 +3,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
+import importlib
 import json
 from pathlib import Path
 import shutil
 import subprocess
-import time
 from typing import Any
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-STATE_DIR = REPO_ROOT / ".state"
+WORK_ROOT = Path.cwd()
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = PACKAGE_ROOT / "gpa_plugins"
+STATE_DIR = WORK_ROOT / ".state"
 EXPORT_DIR = STATE_DIR / "exports"
+REQUEST_DIR = STATE_DIR / "requests"
+TEXTURE_DIR = STATE_DIR / "textures"
 STATE_PATH = STATE_DIR / "active_capture.json"
-PLUGIN_NAME = "gpa_mcp_export"
+EXPORT_PLUGIN_NAME = "gpa_mcp_export"
+TEXTURE_EXPORT_PLUGIN_NAME = "gpa_texture_export"
 
 
 def envelope(ok: bool, data: Any = None, err: dict[str, Any] | None = None, truncated: bool = False, count: int | None = None) -> dict[str, Any]:
@@ -92,24 +97,12 @@ class GpaMcpAdapter:
         if not self.frame_analyzer.exists():
             return envelope(False, err={"code": "frame_analyzer_not_found", "msg": str(self.frame_analyzer)})
 
-        self._install_export_plugin()
+        self._install_plugin(EXPORT_PLUGIN_NAME)
         EXPORT_DIR.mkdir(parents=True, exist_ok=True)
         cap_id = self._cap_id(capture_path)
         export_path = EXPORT_DIR / f"{cap_id}.json"
         log_path = EXPORT_DIR / f"{cap_id}.log"
-
-        command = [
-            str(self.frame_analyzer),
-            "--file_to_open",
-            str(capture_path),
-            "--py_plugin",
-            PLUGIN_NAME,
-            "--py_arg",
-            str(export_path),
-            "--output_log",
-            str(log_path),
-        ]
-        completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300, check=False)
+        completed = self._run_plugin(capture_path, EXPORT_PLUGIN_NAME, export_path, log_path, timeout=300)
         if completed.returncode != 0:
             return envelope(
                 False,
@@ -149,6 +142,115 @@ class GpaMcpAdapter:
         )
         self._save_state(state)
         return envelope(True, {**state.to_json(), "verified": True})
+
+    def export_texture(
+        self,
+        rid: str,
+        eid: int | None = None,
+        *,
+        mip: int = 0,
+        slice_: int = 0,
+        extract_before: bool = False,
+        view_type: str | None = None,
+        output: str | None = None,
+        container: str = "png",
+    ) -> dict[str, Any]:
+        state = self._load_state()
+        if state is None:
+            return envelope(False, err={"code": "no_active_capture", "msg": "Call open_capture before export_texture"})
+
+        capture_path = Path(state.path)
+        if not capture_path.exists():
+            return envelope(False, err={"code": "capture_not_found", "msg": f"Capture not found: {state.path}"})
+        if not self.frame_analyzer.exists():
+            return envelope(False, err={"code": "frame_analyzer_not_found", "msg": str(self.frame_analyzer)})
+
+        rid_key = self._rid_key(rid)
+        container_l = str(container or "png").lower()
+        if container_l not in {"png", "raw"}:
+            return envelope(False, err={"code": "invalid_container", "msg": f"Unsupported container: {container}"})
+
+        output_path = self._texture_output_path(
+            state.cap,
+            rid_key,
+            eid=eid,
+            mip=mip,
+            slice_=slice_,
+            extract_before=extract_before,
+            container=container_l,
+            output=output,
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        REQUEST_DIR.mkdir(parents=True, exist_ok=True)
+
+        request = {
+            "rid": rid_key,
+            "eid": int(eid) if eid is not None else None,
+            "mip": int(mip),
+            "slice": int(slice_),
+            "extract_before": bool(extract_before),
+            "view_type": str(view_type) if view_type else None,
+            "container": container_l,
+            "output_path": str(output_path),
+        }
+        request_id = hashlib.sha1(json.dumps(request, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+        request_path = REQUEST_DIR / f"{state.cap}_{request_id}.request.json"
+        result_path = REQUEST_DIR / f"{state.cap}_{request_id}.result.json"
+        log_path = REQUEST_DIR / f"{state.cap}_{request_id}.log"
+        request["result_path"] = str(result_path)
+        request_path.write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        self._install_plugin(TEXTURE_EXPORT_PLUGIN_NAME)
+        completed = self._run_plugin(capture_path, TEXTURE_EXPORT_PLUGIN_NAME, request_path, log_path, timeout=300)
+        if completed.returncode != 0:
+            return envelope(
+                False,
+                err={
+                    "code": "frame_analyzer_failed",
+                    "msg": completed.stderr or completed.stdout or f"exit code {completed.returncode}",
+                },
+            )
+        if not result_path.exists():
+            return envelope(
+                False,
+                err={
+                    "code": "texture_export_missing",
+                    "msg": f"Texture export plugin did not create {result_path}",
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                },
+            )
+
+        result = self._load_frame(result_path)
+        if not result.get("ok"):
+            return envelope(
+                False,
+                data=result,
+                err={"code": "texture_export_failed", "msg": result.get("error") or "Texture export failed"},
+            )
+        if not output_path.exists():
+            return envelope(
+                False,
+                data=result,
+                err={"code": "texture_output_missing", "msg": f"Texture export did not create {output_path}"},
+            )
+        data = {
+            "rid": result.get("rid"),
+            "eid": result.get("eid"),
+            "extract_before": result.get("extract_before"),
+            "mip": result.get("mip"),
+            "slice": result.get("slice"),
+            "container": result.get("container"),
+            "path": str(output_path),
+            "width": result.get("width"),
+            "height": result.get("height"),
+            "row_pitch": result.get("row_pitch"),
+            "resource": result.get("resource"),
+            "log_path": str(log_path) if log_path.exists() else None,
+            "request_path": str(request_path),
+            "result_path": str(result_path),
+        }
+        return envelope(True, data)
 
     def find_events(
         self,
@@ -334,11 +436,33 @@ class GpaMcpAdapter:
                 return candidate
         return candidates[0]
 
-    def _install_export_plugin(self) -> None:
-        src = REPO_ROOT / "plugins" / PLUGIN_NAME / "__init__.py"
-        dst_dir = Path.home() / "Documents" / "GPA" / "python_plugins" / PLUGIN_NAME
+    def _plugin_source(self, plugin_name: str) -> Path:
+        src = PLUGIN_ROOT / plugin_name / "__init__.py"
+        if src.exists():
+            return src
+        package_name = f"gpa_mcp.gpa_plugins.{plugin_name}"
+        module = importlib.import_module(package_name)
+        return Path(module.__file__ or "").resolve()
+
+    def _install_plugin(self, plugin_name: str) -> None:
+        src = self._plugin_source(plugin_name)
+        dst_dir = Path.home() / "Documents" / "GPA" / "python_plugins" / plugin_name
         dst_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst_dir / "__init__.py")
+
+    def _run_plugin(self, capture_path: Path, plugin_name: str, plugin_arg_path: Path, log_path: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+        command = [
+            str(self.frame_analyzer),
+            "--file_to_open",
+            str(capture_path),
+            "--py_plugin",
+            plugin_name,
+            "--py_arg",
+            str(plugin_arg_path),
+            "--output_log",
+            str(log_path),
+        ]
+        return subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout, check=False)
 
     def _load_state(self) -> ActiveCapture | None:
         if not STATE_PATH.exists():
@@ -362,6 +486,27 @@ class GpaMcpAdapter:
     @staticmethod
     def _cap_id(path: Path) -> str:
         return "gpa_" + hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()[:12]
+
+    @staticmethod
+    def _texture_output_path(
+        cap: str,
+        rid: str,
+        *,
+        eid: int | None,
+        mip: int,
+        slice_: int,
+        extract_before: bool,
+        container: str,
+        output: str | None,
+    ) -> Path:
+        if output:
+            return Path(output).expanduser().resolve()
+        suffix = ".png" if container == "png" else ".bin"
+        when = "before" if extract_before else "after"
+        eid_text = f"eid{eid}" if eid is not None else "last"
+        safe_rid = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in rid)
+        name = f"{cap}_{safe_rid}_{eid_text}_{when}_m{mip}_s{slice_}{suffix}"
+        return (TEXTURE_DIR / name).resolve()
 
     @staticmethod
     def _infer_api(frame: dict[str, Any]) -> str | None:

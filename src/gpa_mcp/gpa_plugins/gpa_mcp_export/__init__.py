@@ -1,7 +1,13 @@
 import json
 import os
+import sys
 import time
 import traceback
+
+
+GPA_PLUGIN_ROOT = r"C:\Program Files\IntelSWTools\GPA\python_plugins"
+if GPA_PLUGIN_ROOT not in sys.path:
+    sys.path.insert(0, GPA_PLUGIN_ROOT)
 
 from plugin_api.api_call import ApiCall
 from plugin_api.group import Group

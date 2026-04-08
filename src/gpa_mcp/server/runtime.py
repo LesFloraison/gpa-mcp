@@ -82,6 +82,24 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "required": ["eid"],
         },
     },
+    {
+        "name": "export_texture",
+        "description": "Export a GPA texture resource for a specific event/mip/slice to PNG or raw bytes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "rid": {"type": "string"},
+                "eid": {"type": "integer"},
+                "mip": {"type": "integer", "default": 0},
+                "slice": {"type": "integer", "default": 0},
+                "extract_before": {"type": "boolean", "default": False},
+                "view_type": {"type": "string"},
+                "output": {"type": "string"},
+                "container": {"type": "string", "default": "png"},
+            },
+            "required": ["rid"],
+        },
+    },
 ]
 
 
@@ -97,6 +115,7 @@ class GpaToolRegistry:
             "inspect_shader": self._inspect_shader,
             "inspect_texture_usage": self._inspect_texture_usage,
             "inspect_pipeline_state": self._inspect_pipeline_state,
+            "export_texture": self._export_texture,
         }
 
     def invoke(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -148,6 +167,21 @@ class GpaToolRegistry:
         if "eid" not in params:
             return envelope(False, err={"code": "missing_args", "msg": "eid is required"})
         return self.adapter.inspect_pipeline_state(int(params["eid"]))
+
+    def _export_texture(self, params: dict[str, Any]) -> dict[str, Any]:
+        rid = params.get("rid")
+        if rid is None:
+            return envelope(False, err={"code": "missing_args", "msg": "rid is required"})
+        return self.adapter.export_texture(
+            str(rid),
+            eid=int(params["eid"]) if params.get("eid") is not None else None,
+            mip=int(params.get("mip", 0) or 0),
+            slice_=int(params.get("slice", 0) or 0),
+            extract_before=bool(params.get("extract_before", False)),
+            view_type=str(params["view_type"]) if params.get("view_type") is not None else None,
+            output=str(params["output"]) if params.get("output") is not None else None,
+            container=str(params.get("container", "png") or "png"),
+        )
 
 
 def _configure_stdio() -> None:
@@ -203,6 +237,31 @@ def maybe_create_fastmcp() -> Any | None:
     @app.tool(description="Return compact GPA pipeline state for one event.")
     def inspect_pipeline_state(eid: int) -> Any:
         return registry.invoke("inspect_pipeline_state", {"eid": eid})
+
+    @app.tool(description="Export a GPA texture resource for a specific event/mip/slice to PNG or raw bytes.")
+    def export_texture(
+        rid: str,
+        eid: int | None = None,
+        mip: int = 0,
+        slice: int = 0,
+        extract_before: bool = False,
+        view_type: str | None = None,
+        output: str | None = None,
+        container: str = "png",
+    ) -> Any:
+        return registry.invoke(
+            "export_texture",
+            {
+                "rid": rid,
+                "eid": eid,
+                "mip": mip,
+                "slice": slice,
+                "extract_before": extract_before,
+                "view_type": view_type,
+                "output": output,
+                "container": container,
+            },
+        )
 
     return app
 
