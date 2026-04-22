@@ -5,13 +5,26 @@ from datetime import datetime
 import hashlib
 import importlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 from typing import Any
 
 
-WORK_ROOT = Path.cwd()
+def _default_work_root() -> Path:
+    configured = os.environ.get("GPA_MCP_WORK_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        return (Path(local_app_data) / "gpa-mcp").resolve()
+
+    return (Path.home() / ".local" / "share" / "gpa-mcp").resolve()
+
+
+WORK_ROOT = _default_work_root()
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = PACKAGE_ROOT / "gpa_plugins"
 STATE_DIR = WORK_ROOT / ".state"
@@ -265,6 +278,7 @@ class GpaMcpAdapter:
         marker_filter = (marker or "").lower()
         items = []
         marker_by_eid = self._marker_by_eid(frame)
+        event_index_by_eid = self._event_index_by_eid(frame)
         for call in frame.get("calls", []):
             if not call:
                 continue
@@ -280,10 +294,48 @@ class GpaMcpAdapter:
                 continue
             if marker_filter and marker_filter not in marker_path.lower():
                 continue
-            items.append({"eid": eid, "name": name, "type": self._event_type(name), "marker": marker_path})
+            items.append(
+                {
+                    "event": event_index_by_eid.get(eid),
+                    "eid": eid,
+                    "name": name,
+                    "type": self._event_type(name),
+                    "marker": marker_path,
+                }
+            )
             if len(items) >= limit:
                 break
         return envelope(True, {"count": len(items), "items": items}, truncated=len(items) >= limit, count=len(items))
+
+    def resolve_event(self, event: int) -> dict[str, Any]:
+        frame = self._require_frame()
+        event_count = self._event_count(frame)
+        call = self._event_call_by_index(frame, event)
+        if call is None:
+            return envelope(
+                False,
+                err={
+                    "code": "event_not_found",
+                    "msg": f"GPA UI event {event} is outside the valid 1-based range 1..{event_count}",
+                },
+            )
+        eid = int(call.get("id") or 0)
+        name = str(call.get("name") or "")
+        marker_by_eid = self._marker_by_eid(frame)
+        binding = self._binding(frame, eid)
+        return envelope(
+            True,
+            {
+                "event": int(event),
+                "eid": eid,
+                "name": name,
+                "type": self._event_type(name),
+                "marker": marker_by_eid.get(eid, ""),
+                "has_binding": binding is not None,
+                "args": call.get("arguments", []),
+                "context": self._event_context(frame, eid),
+            },
+        )
 
     def list_passes(self, marker: str | None = None, limit: int = 50) -> dict[str, Any]:
         frame = self._require_frame()
@@ -462,7 +514,15 @@ class GpaMcpAdapter:
             "--output_log",
             str(log_path),
         ]
-        return subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout, check=False)
+        return subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
 
     def _load_state(self) -> ActiveCapture | None:
         if not STATE_PATH.exists():
@@ -537,6 +597,27 @@ class GpaMcpAdapter:
             if call and int(call.get("id") or -1) == int(eid):
                 return call
         return None
+
+    @staticmethod
+    def _event_calls(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        return [call for call in frame.get("calls", []) if (call or {}).get("is_event")]
+
+    def _event_count(self, frame: dict[str, Any]) -> int:
+        return len(self._event_calls(frame))
+
+    def _event_call_by_index(self, frame: dict[str, Any], event: int) -> dict[str, Any] | None:
+        idx = int(event) - 1
+        event_calls = self._event_calls(frame)
+        if idx < 0 or idx >= len(event_calls):
+            return None
+        return event_calls[idx]
+
+    def _event_index_by_eid(self, frame: dict[str, Any]) -> dict[int, int]:
+        out = {}
+        for idx, call in enumerate(self._event_calls(frame), start=1):
+            if call and call.get("id") is not None:
+                out[int(call.get("id"))] = idx
+        return out
 
     @staticmethod
     def _binding(frame: dict[str, Any], eid: int) -> dict[str, Any] | None:
@@ -757,7 +838,7 @@ class GpaMcpAdapter:
 
     def _event_context(self, frame: dict[str, Any], eid: int) -> dict[str, Any]:
         marker_by_eid = self._marker_by_eid(frame)
-        event_calls = [call for call in frame.get("calls", []) if (call or {}).get("is_event")]
+        event_calls = self._event_calls(frame)
         eids = [int(call.get("id")) for call in event_calls]
         idx = eids.index(int(eid)) if int(eid) in eids else -1
         return {

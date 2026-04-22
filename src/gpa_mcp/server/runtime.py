@@ -26,7 +26,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "find_events",
-        "description": "Find GPA API events by text, pass/group marker, and event id range.",
+        "description": "Find GPA API events by text, pass/group marker, and API eid range. Results include GPA UI event numbers.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -36,6 +36,15 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "eid_max": {"type": "integer"},
                 "limit": {"type": "integer", "default": 50},
             },
+        },
+    },
+    {
+        "name": "resolve_event",
+        "description": "Resolve a 1-based GPA UI event number to the underlying API eid and compact call context.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"event": {"type": "integer"}},
+            "required": ["event"],
         },
     },
     {
@@ -110,6 +119,7 @@ class GpaToolRegistry:
             "open_capture": self._open_capture,
             "get_capture_status": self._get_capture_status,
             "find_events": self._find_events,
+            "resolve_event": self._resolve_event,
             "list_passes": self._list_passes,
             "get_draw_packet": self._get_draw_packet,
             "inspect_shader": self._inspect_shader,
@@ -143,6 +153,11 @@ class GpaToolRegistry:
             eid_max=params.get("eid_max"),
             limit=int(params.get("limit", 50) or 50),
         )
+
+    def _resolve_event(self, params: dict[str, Any]) -> dict[str, Any]:
+        if "event" not in params:
+            return envelope(False, err={"code": "missing_args", "msg": "event is required"})
+        return self.adapter.resolve_event(int(params["event"]))
 
     def _list_passes(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.adapter.list_passes(marker=params.get("marker") or params.get("pass"), limit=int(params.get("limit", 50) or 50))
@@ -208,7 +223,7 @@ def maybe_create_fastmcp() -> Any | None:
     def get_capture_status() -> Any:
         return registry.invoke("get_capture_status")
 
-    @app.tool(description="Find GPA API events by text, pass/group marker, and event id range.")
+    @app.tool(description="Find GPA API events by text, pass/group marker, and API eid range. Results include GPA UI event numbers.")
     def find_events(
         q: str | None = None,
         marker: str | None = None,
@@ -217,6 +232,10 @@ def maybe_create_fastmcp() -> Any | None:
         limit: int = 50,
     ) -> Any:
         return registry.invoke("find_events", {"q": q, "marker": marker, "eid_min": eid_min, "eid_max": eid_max, "limit": limit})
+
+    @app.tool(description="Resolve a 1-based GPA UI event number to the underlying API eid and compact call context.")
+    def resolve_event(event: int) -> Any:
+        return registry.invoke("resolve_event", {"event": event})
 
     @app.tool(description="List pass-like GPA grouping ranges.")
     def list_passes(marker: str | None = None, limit: int = 50) -> Any:
